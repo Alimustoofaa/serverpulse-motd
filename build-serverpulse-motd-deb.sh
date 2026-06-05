@@ -2,7 +2,7 @@
 set -e
 
 PKG_NAME="serverpulse-motd"
-PKG_VERSION="1.4.0"
+PKG_VERSION="1.5.0"
 PKG_ARCH="all"
 BUILD_DIR="${PKG_NAME}"
 DEB_FILE="${PKG_NAME}_${PKG_VERSION}_${PKG_ARCH}.deb"
@@ -25,15 +25,15 @@ Maintainer: Ali Mustofa <hai.alimustofa@gmail.com>
 Depends: bash, coreutils, procps, iproute2
 Recommends: curl, ufw, apt
 Description: ServerPulse MOTD dashboard for Ubuntu
- ServerPulse installs a colorful system dashboard shown when users login via SSH.
- This version uses /etc/profile.d instead of PAM.
+ ServerPulse installs a colorful optimized system dashboard shown when users login via SSH.
+ This version uses /etc/profile.d instead of PAM and includes cache plus parallel processing.
 CONTROL
 
 cat > "$BUILD_DIR/etc/profile.d/$PROFILE_FILE" <<'PROFILE'
 #!/bin/bash
 
 # ServerPulse SSH Login Dashboard
-# This file runs ServerPulse only for interactive SSH sessions.
+# Run only for interactive SSH sessions.
 
 case "$-" in
     *i*) ;;
@@ -51,6 +51,16 @@ cat > "$BUILD_DIR/etc/update-motd.d/$MOTD_FILE" <<'SCRIPT'
 #!/bin/bash
 
 export LC_ALL=C
+
+# =========================
+# Cache Config
+# =========================
+CACHE_DIR="/tmp/serverpulse-cache-${USER:-default}"
+mkdir -p "$CACHE_DIR" 2>/dev/null || true
+
+PUBLIC_IP_TTL=300
+FAILED_LOGIN_TTL=300
+APT_TTL=1800
 
 # =========================
 # Colors
@@ -147,8 +157,61 @@ human_bytes() {
     }'
 }
 
+cache_get_or_run() {
+    local cache_file="$1"
+    local ttl="$2"
+    shift 2
+
+    local now
+    local modified
+
+    if [ -f "$cache_file" ]; then
+        now=$(date +%s)
+        modified=$(stat -c %Y "$cache_file" 2>/dev/null || echo 0)
+
+        if [ $((now - modified)) -lt "$ttl" ]; then
+            cat "$cache_file"
+            return
+        fi
+    fi
+
+    "$@" > "${cache_file}.tmp" 2>/dev/null || echo "N/A" > "${cache_file}.tmp"
+    mv "${cache_file}.tmp" "$cache_file" 2>/dev/null || true
+    cat "$cache_file" 2>/dev/null || echo "N/A"
+}
+
+get_public_ip() {
+    curl -4 -s --max-time 1 https://api.ipify.org 2>/dev/null ||
+    curl -4 -s --max-time 1 https://ifconfig.me 2>/dev/null ||
+    curl -s --max-time 1 https://api.ipify.org 2>/dev/null ||
+    curl -s --max-time 1 https://ifconfig.me 2>/dev/null ||
+    echo "N/A"
+}
+
+get_failed_login() {
+    journalctl _COMM=sshd --since today --no-pager 2>/dev/null |
+        grep -Ei "Failed password|Invalid user|authentication failure" |
+        wc -l
+}
+
+get_pending_update() {
+    if command -v apt >/dev/null 2>&1; then
+        apt list --upgradable 2>/dev/null | grep -c upgradable || true
+    else
+        echo "N/A"
+    fi
+}
+
+get_security_fix() {
+    if command -v apt >/dev/null 2>&1; then
+        apt list --upgradable 2>/dev/null | grep -Ei "security|ubuntu-security" | wc -l || true
+    else
+        echo "N/A"
+    fi
+}
+
 # =========================
-# Basic Info
+# Basic Info - Fast
 # =========================
 HOSTNAME=$(hostname 2>/dev/null || echo "N/A")
 
@@ -163,20 +226,11 @@ KERNEL=$(uname -r 2>/dev/null || echo "N/A")
 IP_ADDRESS=$(hostname -I 2>/dev/null | awk '{print $1}')
 [ -z "$IP_ADDRESS" ] && IP_ADDRESS="N/A"
 
-PUBLIC_IP=$(
-    curl -4 -s --max-time 2 https://ifconfig.me 2>/dev/null ||
-    curl -4 -s --max-time 2 https://api.ipify.org 2>/dev/null ||
-    curl -s --max-time 2 https://ifconfig.me 2>/dev/null ||
-    curl -s --max-time 2 https://api.ipify.org 2>/dev/null ||
-    echo "N/A"
-)
-[ -z "$PUBLIC_IP" ] && PUBLIC_IP="N/A"
-
 UPTIME=$(uptime -p 2>/dev/null | sed 's/up //' || echo "N/A")
 [ -z "$UPTIME" ] && UPTIME="N/A"
 
 # =========================
-# CPU Info
+# CPU Info - Fast
 # =========================
 CPU_LOAD=$(awk '{print $1", "$2", "$3}' /proc/loadavg 2>/dev/null || echo "N/A")
 CPU_CORES=$(nproc 2>/dev/null || echo "N/A")
@@ -193,7 +247,7 @@ CPU_USAGE=$(top -bn1 2>/dev/null | awk -F',' '/Cpu\(s\)/ {
 [ -z "$CPU_USAGE" ] && CPU_USAGE="0"
 
 # =========================
-# Memory Info
+# Memory Info - Fast
 # =========================
 MEM_TOTAL=$(free -m 2>/dev/null | awk '/Mem:/ {printf "%.1f", $2/1024}')
 MEM_USED=$(free -m 2>/dev/null | awk '/Mem:/ {printf "%.1f", $3/1024}')
@@ -204,7 +258,7 @@ MEM_PERCENT=$(free 2>/dev/null | awk '/Mem:/ {printf "%.0f", $3/$2 * 100}')
 [ -z "$MEM_PERCENT" ] && MEM_PERCENT="0"
 
 # =========================
-# Swap Info
+# Swap Info - Fast
 # =========================
 SWAP_TOTAL_MB=$(free -m 2>/dev/null | awk '/Swap:/ {print $2}')
 SWAP_USED_MB=$(free -m 2>/dev/null | awk '/Swap:/ {print $3}')
@@ -220,7 +274,7 @@ else
 fi
 
 # =========================
-# Disk Info
+# Disk Info - Fast
 # =========================
 DISK_TOTAL=$(df -h / 2>/dev/null | awk 'NR==2 {print $2}')
 DISK_USED=$(df -h / 2>/dev/null | awk 'NR==2 {print $3}')
@@ -247,21 +301,24 @@ else
 fi
 
 # =========================
-# GPU Info
+# GPU Info - Optimized
 # =========================
 if command -v nvidia-smi >/dev/null 2>&1; then
     GPU_AVAILABLE="Yes"
 
-    GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader,nounits 2>/dev/null | head -n 1)
-    GPU_DRIVER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader,nounits 2>/dev/null | head -n 1)
-    GPU_CUDA=$(nvidia-smi 2>/dev/null | grep -oP 'CUDA Version:[[:space:]]*\K[0-9.]+' | head -n 1)
+    GPU_QUERY=$(nvidia-smi --query-gpu=name,driver_version,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,power.limit --format=csv,noheader,nounits 2>/dev/null | head -n 1)
 
-    GPU_UTIL=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -n 1)
-    GPU_MEM_USED=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -n 1)
-    GPU_MEM_TOTAL=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -n 1)
-    GPU_TEMP=$(nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits 2>/dev/null | head -n 1)
-    GPU_POWER_DRAW=$(nvidia-smi --query-gpu=power.draw --format=csv,noheader,nounits 2>/dev/null | head -n 1)
-    GPU_POWER_LIMIT=$(nvidia-smi --query-gpu=power.limit --format=csv,noheader,nounits 2>/dev/null | head -n 1)
+    GPU_NAME=$(echo "$GPU_QUERY" | awk -F', ' '{print $1}')
+    GPU_DRIVER=$(echo "$GPU_QUERY" | awk -F', ' '{print $2}')
+    GPU_UTIL=$(echo "$GPU_QUERY" | awk -F', ' '{print $3}')
+    GPU_MEM_USED=$(echo "$GPU_QUERY" | awk -F', ' '{print $4}')
+    GPU_MEM_TOTAL=$(echo "$GPU_QUERY" | awk -F', ' '{print $5}')
+    GPU_TEMP=$(echo "$GPU_QUERY" | awk -F', ' '{print $6}')
+    GPU_POWER_DRAW=$(echo "$GPU_QUERY" | awk -F', ' '{print $7}')
+    GPU_POWER_LIMIT=$(echo "$GPU_QUERY" | awk -F', ' '{print $8}')
+
+    GPU_CUDA=$(nvidia-smi 2>/dev/null | grep -oP 'CUDA Version:[[:space:]]*\K[0-9.]+' | head -n 1)
+    GPU_COUNT=$(nvidia-smi -L 2>/dev/null | wc -l)
 
     [ -z "$GPU_NAME" ] && GPU_NAME="N/A"
     [ -z "$GPU_DRIVER" ] && GPU_DRIVER="N/A"
@@ -272,15 +329,13 @@ if command -v nvidia-smi >/dev/null 2>&1; then
     [ -z "$GPU_TEMP" ] && GPU_TEMP="N/A"
     [ -z "$GPU_POWER_DRAW" ] && GPU_POWER_DRAW="N/A"
     [ -z "$GPU_POWER_LIMIT" ] && GPU_POWER_LIMIT="N/A"
+    [ -z "$GPU_COUNT" ] && GPU_COUNT="1"
 
     if [ "$GPU_MEM_TOTAL" -gt 0 ] 2>/dev/null; then
         GPU_MEM_PERCENT=$(awk -v used="$GPU_MEM_USED" -v total="$GPU_MEM_TOTAL" 'BEGIN {printf "%.0f", used/total*100}')
     else
         GPU_MEM_PERCENT="0"
     fi
-
-    GPU_COUNT=$(nvidia-smi -L 2>/dev/null | wc -l)
-    [ -z "$GPU_COUNT" ] && GPU_COUNT="1"
 else
     GPU_AVAILABLE="No"
     GPU_COUNT="0"
@@ -297,27 +352,16 @@ else
 fi
 
 # =========================
-# SSH Info
+# SSH Info - Fast Part
 # =========================
 SSH_USERS=$(who 2>/dev/null | wc -l)
 
 LAST_LOGIN=$(last -n 1 -w 2>/dev/null | head -n 1 | awk '{print $1" from "$3}')
 [ -z "$LAST_LOGIN" ] && LAST_LOGIN="N/A"
 
-FAILED_LOGIN=$(journalctl _COMM=sshd --since today --no-pager 2>/dev/null | grep -Ei "Failed password|Invalid user|authentication failure" | wc -l)
-[ -z "$FAILED_LOGIN" ] && FAILED_LOGIN="0"
-
 # =========================
-# Security Info
+# Security Fast Part
 # =========================
-if command -v apt >/dev/null 2>&1; then
-    PENDING_UPDATE=$(apt list --upgradable 2>/dev/null | grep -c upgradable || true)
-    SECURITY_FIX=$(apt list --upgradable 2>/dev/null | grep -Ei "security|ubuntu-security" | wc -l || true)
-else
-    PENDING_UPDATE="N/A"
-    SECURITY_FIX="N/A"
-fi
-
 if [ -f /var/run/reboot-required ]; then
     REBOOT_REQUIRED="Yes"
 else
@@ -332,7 +376,7 @@ else
 fi
 
 # =========================
-# Network Info
+# Network Info - Fast
 # =========================
 INTERFACE=$(ip route 2>/dev/null | awk '/default/ {print $5; exit}')
 [ -z "$INTERFACE" ] && INTERFACE="N/A"
@@ -354,6 +398,53 @@ DNS=$(grep -m1 '^nameserver' /etc/resolv.conf 2>/dev/null | awk '{print $2}')
 
 GATEWAY=$(ip route 2>/dev/null | awk '/default/ {print $3; exit}')
 [ -z "$GATEWAY" ] && GATEWAY="N/A"
+
+# =========================
+# Heavy Data - Parallel + Cache
+# =========================
+TMP_PUBLIC_IP="$CACHE_DIR/public_ip.result"
+TMP_FAILED_LOGIN="$CACHE_DIR/failed_login.result"
+TMP_PENDING_UPDATE="$CACHE_DIR/pending_update.result"
+TMP_SECURITY_FIX="$CACHE_DIR/security_fix.result"
+
+(
+    cache_get_or_run "$CACHE_DIR/public_ip.cache" "$PUBLIC_IP_TTL" get_public_ip
+) > "$TMP_PUBLIC_IP" 2>/dev/null &
+
+PID_PUBLIC_IP=$!
+
+(
+    cache_get_or_run "$CACHE_DIR/failed_login.cache" "$FAILED_LOGIN_TTL" get_failed_login
+) > "$TMP_FAILED_LOGIN" 2>/dev/null &
+
+PID_FAILED_LOGIN=$!
+
+(
+    cache_get_or_run "$CACHE_DIR/pending_update.cache" "$APT_TTL" get_pending_update
+) > "$TMP_PENDING_UPDATE" 2>/dev/null &
+
+PID_PENDING_UPDATE=$!
+
+(
+    cache_get_or_run "$CACHE_DIR/security_fix.cache" "$APT_TTL" get_security_fix
+) > "$TMP_SECURITY_FIX" 2>/dev/null &
+
+PID_SECURITY_FIX=$!
+
+wait "$PID_PUBLIC_IP" 2>/dev/null || true
+wait "$PID_FAILED_LOGIN" 2>/dev/null || true
+wait "$PID_PENDING_UPDATE" 2>/dev/null || true
+wait "$PID_SECURITY_FIX" 2>/dev/null || true
+
+PUBLIC_IP=$(cat "$TMP_PUBLIC_IP" 2>/dev/null || echo "N/A")
+FAILED_LOGIN=$(cat "$TMP_FAILED_LOGIN" 2>/dev/null || echo "0")
+PENDING_UPDATE=$(cat "$TMP_PENDING_UPDATE" 2>/dev/null || echo "N/A")
+SECURITY_FIX=$(cat "$TMP_SECURITY_FIX" 2>/dev/null || echo "N/A")
+
+[ -z "$PUBLIC_IP" ] && PUBLIC_IP="N/A"
+[ -z "$FAILED_LOGIN" ] && FAILED_LOGIN="0"
+[ -z "$PENDING_UPDATE" ] && PENDING_UPDATE="N/A"
+[ -z "$SECURITY_FIX" ] && SECURITY_FIX="N/A"
 
 # =========================
 # Output

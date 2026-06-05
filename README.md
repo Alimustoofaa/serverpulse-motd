@@ -49,7 +49,7 @@ ServerPulse MOTD installs a dynamic system dashboard that displays comprehensive
 ./build-serverpulse-motd-deb.sh
 
 # Install
-sudo dpkg -i serverpulse-motd_1.4.0_all.deb
+sudo dpkg -i serverpulse-motd_1.5.0_all.deb
 ```
 
 ### Manual Installation
