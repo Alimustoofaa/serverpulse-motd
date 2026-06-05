@@ -542,13 +542,43 @@ chmod 755 /usr/local/bin/serverpulse-motd
 chown root:root /etc/profile.d/serverpulse.sh
 chmod 755 /etc/profile.d/serverpulse.sh
 
-# Prevent OpenSSH static MOTD duplication.
-# ServerPulse is shown by /etc/profile.d/serverpulse.sh instead.
+# Disable default Ubuntu MOTD scripts
+for file in \
+  /etc/update-motd.d/00-header \
+  /etc/update-motd.d/10-help-text \
+  /etc/update-motd.d/50-motd-news \
+  /etc/update-motd.d/80-livepatch \
+  /etc/update-motd.d/85-fwupd \
+  /etc/update-motd.d/90-updates-available \
+  /etc/update-motd.d/91-contract-ua-esm-status \
+  /etc/update-motd.d/91-release-upgrade \
+  /etc/update-motd.d/92-unattended-upgrades \
+  /etc/update-motd.d/95-hwe-eol \
+  /etc/update-motd.d/98-fsck-at-reboot \
+  /etc/update-motd.d/98-reboot-required
+do
+    if [ -f "$file" ]; then
+        chmod -x "$file" || true
+    fi
+done
+
+# Disable PAM MOTD if enabled
+if [ -f /etc/pam.d/sshd ]; then
+    sed -i 's/^\(session.*pam_motd.so.*\)/#\1/' /etc/pam.d/sshd
+fi
+
+# Disable OpenSSH MOTD and Last Login
 if [ -f /etc/ssh/sshd_config ]; then
     if grep -q '^#*PrintMotd ' /etc/ssh/sshd_config; then
         sed -i 's/^#*PrintMotd .*/PrintMotd no/' /etc/ssh/sshd_config
     else
         echo 'PrintMotd no' >> /etc/ssh/sshd_config
+    fi
+
+    if grep -q '^#*PrintLastLog ' /etc/ssh/sshd_config; then
+        sed -i 's/^#*PrintLastLog .*/PrintLastLog no/' /etc/ssh/sshd_config
+    else
+        echo 'PrintLastLog no' >> /etc/ssh/sshd_config
     fi
 
     if command -v sshd >/dev/null 2>&1; then
