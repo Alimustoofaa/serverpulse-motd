@@ -2,17 +2,17 @@
 set -e
 
 PKG_NAME="serverpulse-motd"
-PKG_VERSION="1.5.0"
+PKG_VERSION="1.6.0"
 PKG_ARCH="all"
 BUILD_DIR="${PKG_NAME}"
 DEB_FILE="${PKG_NAME}_${PKG_VERSION}_${PKG_ARCH}.deb"
-MOTD_FILE="99-serverpulse"
+BIN_FILE="serverpulse-motd"
 PROFILE_FILE="serverpulse.sh"
 
 rm -rf "$BUILD_DIR" "$DEB_FILE"
 
 mkdir -p "$BUILD_DIR/DEBIAN"
-mkdir -p "$BUILD_DIR/etc/update-motd.d"
+mkdir -p "$BUILD_DIR/usr/local/bin"
 mkdir -p "$BUILD_DIR/etc/profile.d"
 
 cat > "$BUILD_DIR/DEBIAN/control" <<CONTROL
@@ -33,21 +33,27 @@ cat > "$BUILD_DIR/etc/profile.d/$PROFILE_FILE" <<'PROFILE'
 #!/bin/bash
 
 # ServerPulse SSH Login Dashboard
-# Run only for interactive SSH sessions.
+# Run only once for interactive SSH sessions.
 
 case "$-" in
     *i*) ;;
     *) return 0 2>/dev/null || exit 0 ;;
 esac
 
+if [ -n "$SERVERPULSE_SHOWN" ]; then
+    return 0 2>/dev/null || exit 0
+fi
+
+export SERVERPULSE_SHOWN=1
+
 if [ -n "$SSH_CONNECTION" ] || [ -n "$SSH_CLIENT" ]; then
-    if [ -x /etc/update-motd.d/99-serverpulse ]; then
-        /etc/update-motd.d/99-serverpulse
+    if [ -x /usr/local/bin/serverpulse-motd ]; then
+        /usr/local/bin/serverpulse-motd
     fi
 fi
 PROFILE
 
-cat > "$BUILD_DIR/etc/update-motd.d/$MOTD_FILE" <<'SCRIPT'
+cat > "$BUILD_DIR/usr/local/bin/$BIN_FILE" <<'SCRIPT'
 #!/bin/bash
 
 export LC_ALL=C
@@ -527,14 +533,17 @@ cat > "$BUILD_DIR/DEBIAN/postinst" <<'POSTINST'
 #!/bin/bash
 set -e
 
-chown root:root /etc/update-motd.d/99-serverpulse
-chmod 755 /etc/update-motd.d/99-serverpulse
+# Remove old ServerPulse MOTD location to prevent double output from Ubuntu MOTD/PAM.
+rm -f /etc/update-motd.d/99-serverpulse
+
+chown root:root /usr/local/bin/serverpulse-motd
+chmod 755 /usr/local/bin/serverpulse-motd
 
 chown root:root /etc/profile.d/serverpulse.sh
 chmod 755 /etc/profile.d/serverpulse.sh
 
-# Recommended: prevent OpenSSH static MOTD duplication.
-# This does not require PAM.
+# Prevent OpenSSH static MOTD duplication.
+# ServerPulse is shown by /etc/profile.d/serverpulse.sh instead.
 if [ -f /etc/ssh/sshd_config ]; then
     if grep -q '^#*PrintMotd ' /etc/ssh/sshd_config; then
         sed -i 's/^#*PrintMotd .*/PrintMotd no/' /etc/ssh/sshd_config
@@ -555,6 +564,7 @@ cat > "$BUILD_DIR/DEBIAN/prerm" <<'PRERM'
 #!/bin/bash
 set -e
 
+rm -f /usr/local/bin/serverpulse-motd
 rm -f /etc/update-motd.d/99-serverpulse
 rm -f /etc/profile.d/serverpulse.sh
 
@@ -571,7 +581,7 @@ POSTRM
 chmod 755 "$BUILD_DIR/DEBIAN/postinst"
 chmod 755 "$BUILD_DIR/DEBIAN/prerm"
 chmod 755 "$BUILD_DIR/DEBIAN/postrm"
-chmod 755 "$BUILD_DIR/etc/update-motd.d/$MOTD_FILE"
+chmod 755 "$BUILD_DIR/usr/local/bin/$BIN_FILE"
 chmod 755 "$BUILD_DIR/etc/profile.d/$PROFILE_FILE"
 
 dpkg-deb --build "$BUILD_DIR" "$DEB_FILE"
@@ -583,7 +593,7 @@ echo "Install:"
 echo "sudo dpkg -i $DEB_FILE"
 echo
 echo "Test manual:"
-echo "/etc/update-motd.d/99-serverpulse"
+echo "/usr/local/bin/serverpulse-motd"
 echo
 echo "Test SSH:"
 echo "exit"
