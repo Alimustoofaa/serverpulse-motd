@@ -2,7 +2,7 @@
 set -e
 
 PKG_NAME="serverpulse-motd"
-PKG_VERSION="1.6.0"
+PKG_VERSION="1.7.0"
 PKG_ARCH="all"
 BUILD_DIR="${PKG_NAME}"
 DEB_FILE="${PKG_NAME}_${PKG_VERSION}_${PKG_ARCH}.deb"
@@ -26,7 +26,8 @@ Depends: bash, coreutils, procps, iproute2
 Recommends: curl, ufw, apt
 Description: ServerPulse MOTD dashboard for Ubuntu
  ServerPulse installs a colorful optimized system dashboard shown when users login via SSH.
- This version uses /etc/profile.d instead of PAM and includes cache plus parallel processing.
+ This version uses /etc/profile.d instead of PAM, includes cache, parallel processing,
+ and Jetson/Orin GPU compatibility.
 CONTROL
 
 cat > "$BUILD_DIR/etc/profile.d/$PROFILE_FILE" <<'PROFILE'
@@ -90,6 +91,8 @@ dash() {
 usage_color() {
     local percent="$1"
 
+    percent=$(num_or_zero "$percent")
+
     if [ "$percent" -ge 80 ] 2>/dev/null; then
         echo "$RED"
     elif [ "$percent" -ge 60 ] 2>/dev/null; then
@@ -118,6 +121,43 @@ status_color() {
     esac
 }
 
+num_or_zero() {
+    local value="$1"
+
+    value=$(echo "$value" | sed 's/[^0-9.]//g')
+
+    if [ -z "$value" ]; then
+        echo "0"
+    else
+        printf "%.0f" "$value" 2>/dev/null || echo "0"
+    fi
+}
+
+clean_na() {
+    local value="$1"
+
+    case "$value" in
+        ""|"[N/A]"|"N/A"|"n/a"|"na")
+            echo "N/A"
+            ;;
+        *)
+            echo "$value"
+            ;;
+    esac
+}
+
+is_jetson() {
+    if [ -f /etc/nv_tegra_release ]; then
+        return 0
+    fi
+
+    if [ -f /proc/device-tree/model ] && grep -qi "tegra\|jetson\|orin" /proc/device-tree/model 2>/dev/null; then
+        return 0
+    fi
+
+    return 1
+}
+
 bar() {
     local percent="$1"
     local total=20
@@ -125,7 +165,7 @@ bar() {
     local empty=20
     local color
 
-    [ -z "$percent" ] && percent=0
+    percent=$(num_or_zero "$percent")
 
     if [ "$percent" -lt 0 ] 2>/dev/null; then
         percent=0
@@ -153,6 +193,8 @@ bar() {
 
 human_bytes() {
     local bytes="$1"
+
+    bytes=$(num_or_zero "$bytes")
 
     awk -v b="$bytes" 'BEGIN {
         if (b >= 1099511627776) printf "%.1f TB", b/1099511627776;
@@ -217,7 +259,7 @@ get_security_fix() {
 }
 
 # =========================
-# Basic Info - Fast
+# Basic Info
 # =========================
 HOSTNAME=$(hostname 2>/dev/null || echo "N/A")
 
@@ -236,7 +278,7 @@ UPTIME=$(uptime -p 2>/dev/null | sed 's/up //' || echo "N/A")
 [ -z "$UPTIME" ] && UPTIME="N/A"
 
 # =========================
-# CPU Info - Fast
+# CPU Info
 # =========================
 CPU_LOAD=$(awk '{print $1", "$2", "$3}' /proc/loadavg 2>/dev/null || echo "N/A")
 CPU_CORES=$(nproc 2>/dev/null || echo "N/A")
@@ -250,10 +292,10 @@ CPU_USAGE=$(top -bn1 2>/dev/null | awk -F',' '/Cpu\(s\)/ {
     }
 }')
 
-[ -z "$CPU_USAGE" ] && CPU_USAGE="0"
+CPU_USAGE=$(num_or_zero "$CPU_USAGE")
 
 # =========================
-# Memory Info - Fast
+# Memory Info
 # =========================
 MEM_TOTAL=$(free -m 2>/dev/null | awk '/Mem:/ {printf "%.1f", $2/1024}')
 MEM_USED=$(free -m 2>/dev/null | awk '/Mem:/ {printf "%.1f", $3/1024}')
@@ -261,10 +303,10 @@ MEM_PERCENT=$(free 2>/dev/null | awk '/Mem:/ {printf "%.0f", $3/$2 * 100}')
 
 [ -z "$MEM_TOTAL" ] && MEM_TOTAL="0.0"
 [ -z "$MEM_USED" ] && MEM_USED="0.0"
-[ -z "$MEM_PERCENT" ] && MEM_PERCENT="0"
+MEM_PERCENT=$(num_or_zero "$MEM_PERCENT")
 
 # =========================
-# Swap Info - Fast
+# Swap Info
 # =========================
 SWAP_TOTAL_MB=$(free -m 2>/dev/null | awk '/Swap:/ {print $2}')
 SWAP_USED_MB=$(free -m 2>/dev/null | awk '/Swap:/ {print $3}')
@@ -279,8 +321,10 @@ else
     SWAP_PERCENT=$(awk -v used="$SWAP_USED_MB" -v total="$SWAP_TOTAL_MB" 'BEGIN {printf "%.0f", used/total*100}')
 fi
 
+SWAP_PERCENT=$(num_or_zero "$SWAP_PERCENT")
+
 # =========================
-# Disk Info - Fast
+# Disk Info
 # =========================
 DISK_TOTAL=$(df -h / 2>/dev/null | awk 'NR==2 {print $2}')
 DISK_USED=$(df -h / 2>/dev/null | awk 'NR==2 {print $3}')
@@ -289,8 +333,8 @@ INODE_PERCENT=$(df -i / 2>/dev/null | awk 'NR==2 {print $5}' | tr -d '%')
 
 [ -z "$DISK_TOTAL" ] && DISK_TOTAL="N/A"
 [ -z "$DISK_USED" ] && DISK_USED="N/A"
-[ -z "$DISK_PERCENT" ] && DISK_PERCENT="0"
-[ -z "$INODE_PERCENT" ] && INODE_PERCENT="0"
+DISK_PERCENT=$(num_or_zero "$DISK_PERCENT")
+INODE_PERCENT=$(num_or_zero "$INODE_PERCENT")
 
 ROOT_DEV=$(df / 2>/dev/null | awk 'NR==2 {print $1}' | sed 's#/dev/##')
 
@@ -298,8 +342,8 @@ if [ -n "$ROOT_DEV" ] && [ -f /proc/diskstats ]; then
     DISK_READ_MB=$(awk -v dev="$ROOT_DEV" '$3==dev {printf "%.0f", $6*512/1024/1024}' /proc/diskstats 2>/dev/null)
     DISK_WRITE_MB=$(awk -v dev="$ROOT_DEV" '$3==dev {printf "%.0f", $10*512/1024/1024}' /proc/diskstats 2>/dev/null)
 
-    [ -z "$DISK_READ_MB" ] && DISK_READ_MB="0"
-    [ -z "$DISK_WRITE_MB" ] && DISK_WRITE_MB="0"
+    DISK_READ_MB=$(num_or_zero "$DISK_READ_MB")
+    DISK_WRITE_MB=$(num_or_zero "$DISK_WRITE_MB")
 
     DISK_IO="Read ${DISK_READ_MB}MB | Write ${DISK_WRITE_MB}MB"
 else
@@ -307,7 +351,7 @@ else
 fi
 
 # =========================
-# GPU Info - Optimized
+# GPU Info - NVIDIA / Jetson Safe
 # =========================
 if command -v nvidia-smi >/dev/null 2>&1; then
     GPU_AVAILABLE="Yes"
@@ -329,19 +373,69 @@ if command -v nvidia-smi >/dev/null 2>&1; then
     [ -z "$GPU_NAME" ] && GPU_NAME="N/A"
     [ -z "$GPU_DRIVER" ] && GPU_DRIVER="N/A"
     [ -z "$GPU_CUDA" ] && GPU_CUDA="N/A"
-    [ -z "$GPU_UTIL" ] && GPU_UTIL="0"
-    [ -z "$GPU_MEM_USED" ] && GPU_MEM_USED="0"
-    [ -z "$GPU_MEM_TOTAL" ] && GPU_MEM_TOTAL="0"
-    [ -z "$GPU_TEMP" ] && GPU_TEMP="N/A"
-    [ -z "$GPU_POWER_DRAW" ] && GPU_POWER_DRAW="N/A"
-    [ -z "$GPU_POWER_LIMIT" ] && GPU_POWER_LIMIT="N/A"
     [ -z "$GPU_COUNT" ] && GPU_COUNT="1"
 
-    if [ "$GPU_MEM_TOTAL" -gt 0 ] 2>/dev/null; then
-        GPU_MEM_PERCENT=$(awk -v used="$GPU_MEM_USED" -v total="$GPU_MEM_TOTAL" 'BEGIN {printf "%.0f", used/total*100}')
+    GPU_UTIL=$(num_or_zero "$GPU_UTIL")
+    GPU_MEM_USED=$(clean_na "$GPU_MEM_USED")
+    GPU_MEM_TOTAL=$(clean_na "$GPU_MEM_TOTAL")
+    GPU_TEMP=$(clean_na "$GPU_TEMP")
+    GPU_POWER_DRAW=$(clean_na "$GPU_POWER_DRAW")
+    GPU_POWER_LIMIT=$(clean_na "$GPU_POWER_LIMIT")
+
+    GPU_MEM_USED_NUM=$(num_or_zero "$GPU_MEM_USED")
+    GPU_MEM_TOTAL_NUM=$(num_or_zero "$GPU_MEM_TOTAL")
+
+    if [ "$GPU_MEM_TOTAL_NUM" -gt 0 ] 2>/dev/null; then
+        GPU_MEM_PERCENT=$(awk -v used="$GPU_MEM_USED_NUM" -v total="$GPU_MEM_TOTAL_NUM" 'BEGIN {printf "%.0f", used/total*100}')
     else
         GPU_MEM_PERCENT="0"
     fi
+
+elif is_jetson; then
+    GPU_AVAILABLE="Yes"
+    GPU_COUNT="1"
+
+    JETSON_MODEL=$(tr -d '\0' < /proc/device-tree/model 2>/dev/null || echo "Jetson")
+    GPU_NAME="$JETSON_MODEL"
+    GPU_DRIVER=$(cat /etc/nv_tegra_release 2>/dev/null | awk -F',' '{print $1}' | sed 's/# //')
+    GPU_CUDA=$(nvcc --version 2>/dev/null | grep release | sed -E 's/.*release ([0-9.]+).*/\1/' | head -n 1)
+
+    [ -z "$GPU_DRIVER" ] && GPU_DRIVER="Jetson L4T"
+    [ -z "$GPU_CUDA" ] && GPU_CUDA="N/A"
+
+    if command -v tegrastats >/dev/null 2>&1; then
+        TEGRA_LINE=$(timeout 2 tegrastats --interval 1000 2>/dev/null | head -n 1)
+
+        GPU_UTIL=$(echo "$TEGRA_LINE" | grep -oE 'GR3D_FREQ [0-9]+%' | awk '{print $2}' | tr -d '%')
+        GPU_TEMP=$(echo "$TEGRA_LINE" | grep -oE 'GPU@[0-9.]+C' | head -n 1 | sed 's/GPU@//;s/C//')
+        RAM_USED_MB=$(echo "$TEGRA_LINE" | grep -oE 'RAM [0-9]+/[0-9]+MB' | awk '{print $2}' | cut -d/ -f1)
+        RAM_TOTAL_MB=$(echo "$TEGRA_LINE" | grep -oE 'RAM [0-9]+/[0-9]+MB' | awk '{print $2}' | cut -d/ -f2 | sed 's/MB//')
+
+        GPU_UTIL=$(num_or_zero "$GPU_UTIL")
+        GPU_TEMP=$(clean_na "$GPU_TEMP")
+
+        if [ -n "$RAM_USED_MB" ] && [ -n "$RAM_TOTAL_MB" ]; then
+            GPU_MEM_USED="$RAM_USED_MB"
+            GPU_MEM_TOTAL="$RAM_TOTAL_MB"
+            GPU_MEM_PERCENT=$(awk -v used="$RAM_USED_MB" -v total="$RAM_TOTAL_MB" 'BEGIN {printf "%.0f", used/total*100}')
+        else
+            GPU_MEM_USED="N/A"
+            GPU_MEM_TOTAL="N/A"
+            GPU_MEM_PERCENT="0"
+        fi
+
+        GPU_POWER_DRAW="N/A"
+        GPU_POWER_LIMIT="N/A"
+    else
+        GPU_UTIL="0"
+        GPU_MEM_USED="N/A"
+        GPU_MEM_TOTAL="N/A"
+        GPU_MEM_PERCENT="0"
+        GPU_TEMP="N/A"
+        GPU_POWER_DRAW="N/A"
+        GPU_POWER_LIMIT="N/A"
+    fi
+
 else
     GPU_AVAILABLE="No"
     GPU_COUNT="0"
@@ -357,8 +451,11 @@ else
     GPU_POWER_LIMIT="N/A"
 fi
 
+GPU_UTIL=$(num_or_zero "$GPU_UTIL")
+GPU_MEM_PERCENT=$(num_or_zero "$GPU_MEM_PERCENT")
+
 # =========================
-# SSH Info - Fast Part
+# SSH Info
 # =========================
 SSH_USERS=$(who 2>/dev/null | wc -l)
 
@@ -382,7 +479,7 @@ else
 fi
 
 # =========================
-# Network Info - Fast
+# Network Info
 # =========================
 INTERFACE=$(ip route 2>/dev/null | awk '/default/ {print $5; exit}')
 [ -z "$INTERFACE" ] && INTERFACE="N/A"
@@ -492,9 +589,24 @@ if [ "$GPU_AVAILABLE" = "Yes" ]; then
     echo -e "${WHITE}- Driver        :${RESET} ${GPU_DRIVER}"
     echo -e "${WHITE}- CUDA          :${RESET} ${GPU_CUDA}"
     echo -e "${WHITE}- GPU Usage     :${RESET} $(bar "$GPU_UTIL") ${GPU_UTIL}%"
-    echo -e "${WHITE}- GPU Memory    :${RESET} $(bar "$GPU_MEM_PERCENT") ${GPU_MEM_PERCENT}% (${GPU_MEM_USED} MiB / ${GPU_MEM_TOTAL} MiB)"
-    echo -e "${WHITE}- GPU Temp      :${RESET} ${YELLOW}${GPU_TEMP}°C${RESET}"
-    echo -e "${WHITE}- GPU Power     :${RESET} ${GPU_POWER_DRAW}W / ${GPU_POWER_LIMIT}W"
+
+    if [ "$GPU_MEM_USED" = "N/A" ] || [ "$GPU_MEM_TOTAL" = "N/A" ]; then
+        echo -e "${WHITE}- GPU Memory    :${RESET} ${YELLOW}N/A${RESET}"
+    else
+        echo -e "${WHITE}- GPU Memory    :${RESET} $(bar "$GPU_MEM_PERCENT") ${GPU_MEM_PERCENT}% (${GPU_MEM_USED} MiB / ${GPU_MEM_TOTAL} MiB)"
+    fi
+
+    if [ "$GPU_TEMP" = "N/A" ]; then
+        echo -e "${WHITE}- GPU Temp      :${RESET} ${YELLOW}N/A${RESET}"
+    else
+        echo -e "${WHITE}- GPU Temp      :${RESET} ${YELLOW}${GPU_TEMP}°C${RESET}"
+    fi
+
+    if [ "$GPU_POWER_DRAW" = "N/A" ] || [ "$GPU_POWER_LIMIT" = "N/A" ]; then
+        echo -e "${WHITE}- GPU Power     :${RESET} ${YELLOW}N/A${RESET}"
+    else
+        echo -e "${WHITE}- GPU Power     :${RESET} ${GPU_POWER_DRAW}W / ${GPU_POWER_LIMIT}W"
+    fi
 else
     echo -e "${WHITE}- Status        :${RESET} ${YELLOW}No NVIDIA GPU detected${RESET}"
 fi
